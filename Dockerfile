@@ -1,10 +1,11 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
+# Use an NVIDIA CUDA base image with CUDA 12.2 and cuDNN installed
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu20.04
 
 ENV NB_USER="gpuuser"
 ENV UID=999
-
 ENV DEBIAN_FRONTEND noninteractive
 
+# Update system and install dependencies
 RUN apt-get update --yes && \
     apt-get install --yes --no-install-recommends \
     git \
@@ -17,27 +18,31 @@ RUN apt-get update --yes && \
     curl \
     libffi-dev \
     net-tools \
+    rsync \
+    vim \
     wget && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
     locale-gen
 
+# Add deadsnakes PPA and install Python 3.9
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
-    apt install -y python3.8 python3.8-dev python3-pip python3.8-distutils gfortran libopenblas-dev liblapack-dev
+    apt install -y python3.9 python3.9-dev python3.9-distutils python3-pip gfortran libopenblas-dev liblapack-dev
 
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
+# Update alternatives to use Python 3.9
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
     && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
- 
-RUN alias python=/usr/bin/python3.8
-   
-RUN python3.8 -m pip install --upgrade pip requests setuptools pipenv
+
+# Upgrade pip and install Python packages
+RUN python3.9 -m pip install --upgrade pip requests setuptools pipenv
 
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
-ENV PATH=/usr/bin/python3.8:$PATH
+ENV PATH=/usr/bin/python3.9:$PATH
 
 ENV CONDA_DIR=/opt/conda \
     SHELL=/bin/bash \
@@ -48,10 +53,13 @@ ENV CONDA_DIR=/opt/conda \
     PATH="${CONDA_DIR}/bin:${PATH}" \
     HOME="/home/${NB_USER}"
 
+USER root
+
 RUN echo "auth requisite pam_deny.so" >> /etc/pam.d/su && \
     sed -i.bak -e 's/^%admin/#%admin/' /etc/sudoers && \
     sed -i.bak -e 's/^%sudo/#%sudo/' /etc/sudoers && \
     useradd -l -m -s /bin/bash -u $UID $NB_USER && \
+    echo "$NB_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     mkdir -p "${CONDA_DIR}" && \
     chown -R "${NB_USER}" "${CONDA_DIR}" && \
     chmod g+w /etc/passwd
@@ -64,10 +72,18 @@ ENV PATH=/home/$NB_USER/.local/bin:$PATH
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -f -b -p /opt/conda && rm -rf ~/miniconda.sh
 
-RUN conda install -c conda-forge mamba python==3.8
-RUN mamba install -y -q -c "nvidia/label/cuda-11.8.0" cuda-nvcc
+RUN conda install -c conda-forge mamba python==3.9
+RUN mamba install -y -q -c "nvidia/label/cuda-12.2.2" cuda-nvcc
 
-RUN python3.8 -m pip install \
+USER ${NB_USER}
+
+ENV PATH=$CONDA_DIR/bin:$PATH
+ENV PATH=/home/$NB_USER/.local/bin:$PATH
+
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -f -b -p /opt/conda && rm -rf ~/miniconda.sh
+
+RUN python3.9 -m pip install \
     bioblend==1.0.0 \
     galaxy-ie-helpers==0.2.7 \
     numba==0.56.4 \
@@ -95,19 +111,22 @@ RUN python3.8 -m pip install \
     voila==0.3.5 \
     elyra==3.14.1 \
     bqplot==0.12.36 \
-    "colabfold[alphafold] @ git+https://github.com/sokrypton/ColabFold" \
-    https://storage.googleapis.com/jax-releases/cuda11/jaxlib-0.3.25+cuda11.cudnn82-cp38-cp38-manylinux2014_x86_64.whl \
-    jax==0.3.25 \
-    biopython==1.79
+    biopython==1.79 \
+    torch==2.2.1 \
+    "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 
-RUN sed -i -e "s/jax.tree_flatten/jax.tree_util.tree_flatten/g" /opt/conda/lib/python3.8/site-packages/alphafold/model/mapping.py
-RUN sed -i -e "s/jax.tree_unflatten/jax.tree_util.tree_unflatten/g" /opt/conda/lib/python3.8/site-packages/alphafold/model/mapping.py
-
-RUN python3.8 -m pip install \
-    tensorflow-gpu==2.7.0 \
-    tensorflow_probability==0.15.0
+RUN python3.9 -m pip install --no-deps \
+    xformers==0.0.25.post1 \
+    trl==0.8.6 \
+    peft==0.10.0 \
+    accelerate==0.30.0 \
+    bitsandbytes[cuda]==0.43.1
 
 USER root 
+
+RUN ldconfig
+RUN ldconfig /usr/lib64-nvidia
+RUN ldconfig /usr/local/cuda-12.2.2
 
 RUN mkdir -p /home/$NB_USER/.ipython/profile_default/startup/
 RUN mkdir -p /import
@@ -141,7 +160,14 @@ ENV DEBUG=false \
     REMOTE_HOST=none \
     GALAXY_URL=none
 
-RUN chown -R $NB_USER /home/$NB_USER /import
+RUN mkdir -p /import
+RUN mkdir -p ${NB_USER}
+RUN mkdir -p /home/${NB_USER}
+
+RUN ls -lah /home/${NB_USER}/ && ls -lah /import/
+
+# Change ownership of the directories to NB_USER
+RUN chown -R ${NB_USER}:${NB_USER} /home/${NB_USER} /import
 
 USER ${NB_USER}
 
